@@ -25,6 +25,7 @@ private:
     
     QAction* openFileAction;
     QAction* playAction;
+    QAction* pauseAction;
 
     QToolBar* toolBar;
 };

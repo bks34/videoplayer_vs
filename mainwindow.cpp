@@ -25,13 +25,18 @@ void MainWindow::createActions()
     playAction->setShortcut(tr("Ctrl+P"));
     connect(playAction, SIGNAL(triggered()), videoWidget, SLOT(Play()));
 
+    pauseAction = new QAction(tr("Pause"), this);
+    pauseAction->setShortcut(tr("Ctrl+Space"));
+    connect(pauseAction, SIGNAL(triggered()), videoWidget, SLOT(Pause()));
 }
 
 void MainWindow::createToolBars()
 {
     toolBar = addToolBar("tool");
+    toolBar->setMovable(true);
     toolBar->addAction(openFileAction);
     toolBar->addAction(playAction);
+    toolBar->addAction(pauseAction);
 }
 
 void MainWindow::slot_openFile()

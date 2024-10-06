@@ -25,7 +25,7 @@ public:
 
 public slots:
     void Play();
-
+    void Pause();
     
 protected:
     void paintGL() override;
@@ -43,10 +43,16 @@ private:
     enum PlayerState {
         PLAYING,
         STOP,
-        DECODING,
-        DECODED
+        PAUSE
     };
-    PlayerState state = DECODING;
+
+    enum DecoderState {
+        DECODING,
+        DECODED,
+        PAUSED
+    };
+    PlayerState player_state = STOP;        //²¥·ÅÆ÷µÄ×´Ì¬
+    DecoderState decoder_state = DECODED;   //½âÂëÆ÷µÄ×´Ì¬
 
     std::vector<QImage*> frames;
     int play_index = 0;

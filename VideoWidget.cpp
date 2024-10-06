@@ -118,8 +118,12 @@ int VideoWidget::DeCode()
     height = pAVctx->height;
 
     //循环读取视频数据
-	while (state == DECODING && av_read_frame(pFormatCtx, pAVpkt) >= 0)//读取一帧未解码的数据
+	while (av_read_frame(pFormatCtx, pAVpkt) >= 0)//读取一帧未解码的数据
 	{
+        //如果状态是暂停
+        while (decoder_state == DecoderState::PAUSED)
+            continue;
+
 		//如果是视频数据
 		if (pAVpkt->stream_index == VideoIndex)
 		{
@@ -145,8 +149,8 @@ int VideoWidget::DeCode()
                 frames.push_back(img);
                 decode_index = frames.size();
 				mutex.unlock();
-                if(decode_index - play_index >= 6)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if(decode_index - play_index >= 3)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
 			}
 		}
 		av_packet_unref(pAVpkt);
@@ -159,16 +163,35 @@ int VideoWidget::DeCode()
     avformat_close_input(&pFormatCtx);
 
     //该视频已解码完毕
-    state = DECODED;                                        
+    decoder_state = DecoderState::DECODED;
 
     return -1;
 }
 
 void VideoWidget::Play()
 {
-    state = DECODING;
-    t_decode = std::thread(&VideoWidget::DeCode, this);
-    t_decode.detach();
+    player_state = PlayerState::PLAYING;
+    if (decoder_state == DecoderState::PAUSED)
+        decoder_state = DecoderState::DECODING;
+    if (decoder_state == DecoderState::DECODED)
+    {
+        mutex.lock();
+        if (frames.empty())
+        {
+            decoder_state = DecoderState::DECODING;
+            t_decode = std::thread(&VideoWidget::DeCode, this);
+            t_decode.detach();
+        }
+        mutex.unlock();
+    }
+}
+
+void VideoWidget::Pause()
+{
+    if(player_state == PlayerState::PLAYING)
+        player_state = PlayerState::PAUSE;
+    if(decoder_state == DecoderState::DECODING)
+        decoder_state = DecoderState::PAUSED;
 }
 
 void VideoWidget::paintGL()
@@ -187,7 +210,7 @@ void VideoWidget::paintGL()
     }
     //播放完毕后清除frames        
     //以及texture(不同视频的texture的尺寸格式等不同)
-    if (state ==DECODED && play_index >= frames.size())
+    if (decoder_state ==DECODED && play_index >= frames.size())
     {
         play_index = 0;
         frames.clear();
@@ -195,7 +218,6 @@ void VideoWidget::paintGL()
         texture = NULL;
     }
     mutex.unlock();
-
 
 
     if (tmp)
@@ -207,11 +229,10 @@ void VideoWidget::paintGL()
         texture->bind();
     }
     
-
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
-
-    if (tmp)                                            //播放完一帧后清除其资源,避免内存占用过多
+    //播放完一帧后清除其资源,避免内存占用过多
+    if (tmp)                                            
     {
         delete[] tmp->bits();
         delete tmp;
@@ -262,5 +283,6 @@ void VideoWidget::resizeGL(int w, int h)
 
 void VideoWidget::timerEvent(QTimerEvent* event)
 {
-    repaint();
+    if(player_state == PlayerState::PLAYING)
+        repaint();
 }
