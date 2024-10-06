@@ -28,7 +28,7 @@ static const char fragShader[] = R"(#version 430
 
 VideoWidget::VideoWidget(QWidget* parent) : QOpenGLWidget(parent)
 {
-    startTimer(1000 / 60);
+    timerID = startTimer(1000 * fps_den / fps_num);
 }
 
 int VideoWidget::DeCode()
@@ -75,6 +75,11 @@ int VideoWidget::DeCode()
         hasVideo = 1;
         printf("There is a video stream %d.\n", VideoIndex);
     }
+
+    //设置帧数率
+    fps_den = pFormatCtx->streams[VideoIndex]->r_frame_rate.den;
+    fps_num = pFormatCtx->streams[VideoIndex]->r_frame_rate.num;
+    fpsChanged = true;
 
     //获取视频流编码
     pAVctx = avcodec_alloc_context3(NULL);;
@@ -149,8 +154,8 @@ int VideoWidget::DeCode()
                 frames.push_back(img);
                 decode_index = frames.size();
 				mutex.unlock();
-                if(decode_index - play_index >= 3)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+                if (decode_index - play_index >= 3)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(3 * 500 * fps_den / fps_num));
 			}
 		}
 		av_packet_unref(pAVpkt);
@@ -285,4 +290,10 @@ void VideoWidget::timerEvent(QTimerEvent* event)
 {
     if(player_state == PlayerState::PLAYING)
         repaint();
+    if (fpsChanged)
+    {
+        killTimer(timerID);
+        timerID = startTimer(1000 * fps_den / fps_num);
+        fpsChanged = false;
+    }
 }
