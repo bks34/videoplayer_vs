@@ -43,7 +43,8 @@ private:
     enum PlayerState {
         PLAYING,
         STOP,
-        DECODING
+        DECODING,
+        DECODED
     };
     PlayerState state = DECODING;
 

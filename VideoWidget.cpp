@@ -118,7 +118,7 @@ int VideoWidget::DeCode()
     height = pAVctx->height;
 
     //循环读取视频数据
-	while ((av_read_frame(pFormatCtx, pAVpkt)) >= 0)//读取一帧未解码的数据
+	while (state == DECODING && av_read_frame(pFormatCtx, pAVpkt) >= 0)//读取一帧未解码的数据
 	{
 		//如果是视频数据
 		if (pAVpkt->stream_index == VideoIndex)
@@ -145,8 +145,8 @@ int VideoWidget::DeCode()
                 frames.push_back(img);
                 decode_index = frames.size();
 				mutex.unlock();
-                if(decode_index - play_index >= 60)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                if(decode_index - play_index >= 6)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
 			}
 		}
 		av_packet_unref(pAVpkt);
@@ -158,11 +158,15 @@ int VideoWidget::DeCode()
     avcodec_free_context(&pAVctx);
     avformat_close_input(&pFormatCtx);
 
+    //该视频已解码完毕
+    state = DECODED;                                        
+
     return -1;
 }
 
 void VideoWidget::Play()
 {
+    state = DECODING;
     t_decode = std::thread(&VideoWidget::DeCode, this);
     t_decode.detach();
 }
@@ -172,7 +176,7 @@ void VideoWidget::paintGL()
     QImage* tmp = NULL;
     resize(width, height);
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-    glClearColor(1.0, 1.0, 1.0, 1);
+    glClearColor(0.0, 0.0, 0.0, 1);
     vao.bind();
     program.bind();
 
@@ -181,16 +185,25 @@ void VideoWidget::paintGL()
     {
         tmp = frames[play_index++];
     }
-    else if (play_index >= frames.size())
+    //播放完毕后清除frames        
+    //以及texture(不同视频的texture的尺寸格式等不同)
+    if (state ==DECODED && play_index >= frames.size())
     {
         play_index = 0;
         frames.clear();
+        delete texture;
+        texture = NULL;
     }
     mutex.unlock();
 
+
+
     if (tmp)
     {
-        texture = new QOpenGLTexture(tmp->mirrored());
+        if (!texture)
+            texture = new QOpenGLTexture(tmp->mirrored());
+        else
+            texture->setData(tmp->mirrored());
         texture->bind();
     }
     
@@ -198,11 +211,11 @@ void VideoWidget::paintGL()
     glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
 
-    if (tmp)
+    if (tmp)                                            //播放完一帧后清除其资源,避免内存占用过多
     {
         delete[] tmp->bits();
         delete tmp;
-        delete texture;
+        tmp = NULL;
     }
 
     program.release();
