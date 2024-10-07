@@ -1,4 +1,5 @@
 #include "VideoWidget.h"
+#include <SDL.h>
 extern "C"
 {
 #include <libavcodec/avcodec.h>
@@ -6,6 +7,7 @@ extern "C"
 #include <libswscale/swscale.h>
 #include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
+#include <libswresample/swresample.h>
 }
 
 static const char vertShader[] = R"(#version 430
@@ -26,6 +28,34 @@ static const char fragShader[] = R"(#version 430
                                      gl_FragColor = texture(uTexture, oTexture);
                                  })";
 
+#define MAX_AUDIO_FRAME_SIZE 192000
+
+static unsigned int audioLen = 0;
+static uchar* audioChunk = NULL;
+static uchar* audioPos = NULL;
+
+static std::map<int, int> AUDIO_FORMAT_MAP = {
+    // AV_SAMPLE_FMT_NONE = -1,
+     {AV_SAMPLE_FMT_U8,  AUDIO_U8    },
+     {AV_SAMPLE_FMT_S16, AUDIO_S16SYS},
+     {AV_SAMPLE_FMT_S32, AUDIO_S32SYS},
+     {AV_SAMPLE_FMT_FLT, AUDIO_F32SYS}
+};
+
+static void fillAudio(void* udata, uchar* stream, int len)
+{
+    SDL_memset(stream, 0, len);
+    if (audioLen == 0)
+        return;
+
+    len = (len > audioLen ? audioLen : len);
+
+    SDL_MixAudio(stream, audioPos, len, SDL_MIX_MAXVOLUME);
+
+    audioPos += len;
+    audioLen -= len;
+}
+
 VideoWidget::VideoWidget(QWidget* parent) : QOpenGLWidget(parent)
 {
     timerID = startTimer(1000 * fps_den / fps_num);
@@ -33,16 +63,25 @@ VideoWidget::VideoWidget(QWidget* parent) : QOpenGLWidget(parent)
 
 int VideoWidget::DeCode()
 {
-    unsigned char* buf;
-    int hasVideo = 0;
-    int ret, gotPicture;
-    int VideoIndex = -1;
-    const AVCodec* pCodec;
-    AVPacket* pAVpkt;
-    AVCodecContext* pAVctx;
-    AVFrame* pAVframe, * pAVframeRGB;
-    AVFormatContext* pFormatCtx;
-    struct SwsContext* pSwsCtx;
+    unsigned char* buf = NULL;
+    bool hasVideo = false, hasAudio = false;
+    int ret, gotPicture, gotAudio;
+    int VideoIndex = -1, AudioIndex = -1;
+    const AVCodec* pCodec = NULL;
+    const AVCodec* pAudioCodec = NULL;
+    AVPacket* pAVpkt = NULL;
+    AVCodecContext* pVideoAVctx = NULL, * pAudioAVctx = NULL;
+    AVFrame* pAVframe = NULL, * pAVframeRGB = NULL;
+    AVFormatContext* pFormatCtx = NULL;
+    struct SwsContext* pSwsCtx = NULL;
+
+    SwrContext* pSwrctx = NULL;
+    AVSampleFormat outSampleFmt;     //声音格式
+    int outSampleRate;              //采样率
+    int outSampleNb;
+    AVChannelLayout outChannelLayout;
+    int outBufferSize;   //音频输出buff
+    unsigned char* outBuff;
 
     //创建AVFormatContext
     pFormatCtx = avformat_alloc_context();
@@ -50,7 +89,7 @@ int VideoWidget::DeCode()
     //初始化pFormatCtx
     if (avformat_open_input(&pFormatCtx, videoPath.toStdString().data(), NULL, NULL) != 0)
     {
-        printf("avformat_open_input err.\n");
+        qDebug("avformat_open_input err.\n");
         return -1;
     }
 
@@ -58,70 +97,144 @@ int VideoWidget::DeCode()
     if (avformat_find_stream_info(pFormatCtx, NULL) < 0)
     {
         avformat_close_input(&pFormatCtx);
-        printf("avformat_find_stream_info err.\n");
+        qDebug("avformat_find_stream_info err.\n");
         return -2;
     }
 
     //找到视频流的索引
     VideoIndex = av_find_best_stream(pFormatCtx, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
-    //如果没有视频流
-    if (VideoIndex == -1)
+    if (VideoIndex >= 0)
     {
-        hasVideo = 0;
-        printf("There is no video streams.\n");
-    }
-    else
-    {
-        hasVideo = 1;
-        printf("There is a video stream %d.\n", VideoIndex);
+        hasVideo = true;
+        qDebug("There is a video stream %d.\n", VideoIndex);
     }
 
-    //设置帧数率
-    fps_den = pFormatCtx->streams[VideoIndex]->r_frame_rate.den;
-    fps_num = pFormatCtx->streams[VideoIndex]->r_frame_rate.num;
-    fpsChanged = true;
-
-    //获取视频流编码
-    pAVctx = avcodec_alloc_context3(NULL);;
-
-    //查找解码器
-    avcodec_parameters_to_context(pAVctx, pFormatCtx->streams[VideoIndex]->codecpar);
-    pCodec = avcodec_find_decoder(pAVctx->codec_id);
-    if (pCodec == NULL)
+    //找到音频流的索引
+    AudioIndex = av_find_best_stream(pFormatCtx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    if (AudioIndex >= 0)
     {
-        avcodec_free_context(&pAVctx);
-        avformat_close_input(&pFormatCtx);
-        printf("avcodec_find_decoder err.\n");
-        return -4;
+        hasAudio = true;
+        qDebug("There is a audio stream %d.\n", AudioIndex);
+    }
+   
+    if (!(hasAudio || hasVideo))
+    {
+        qDebug("Not a Video!!!\n");
+        return -1;
     }
 
-    //初始化pAVctx
-    if (avcodec_open2(pAVctx, pCodec, NULL) < 0)
+    //处理视频流
+    if (hasVideo)
     {
-        avcodec_free_context(&pAVctx);
-        avformat_close_input(&pFormatCtx);
-        printf("avcodec_open2 err.\n");
-        return -5;
-    }
+        //设置帧数率
+        fps_den = pFormatCtx->streams[VideoIndex]->r_frame_rate.den;
+        fps_num = pFormatCtx->streams[VideoIndex]->r_frame_rate.num;
+        fpsChanged = true;
+
+        //获取音视频流编码
+        pVideoAVctx = avcodec_alloc_context3(NULL);
+        //查找解码器
+        avcodec_parameters_to_context(pVideoAVctx, pFormatCtx->streams[VideoIndex]->codecpar);
+        pCodec = avcodec_find_decoder(pVideoAVctx->codec_id);
+        if (pCodec == NULL)
+        {
+            avcodec_free_context(&pVideoAVctx);
+            avformat_close_input(&pFormatCtx);
+            qDebug("avcodec_find_decoder err.\n");
+            return -4;
+        }
+        //打开解码器
+        if (avcodec_open2(pVideoAVctx, pCodec, NULL) < 0)
+        {
+            avcodec_free_context(&pVideoAVctx);
+            avformat_close_input(&pFormatCtx);
+            qDebug("avcodec_open2 err.\n");
+            return -5;
+        }
+
+        pAVframeRGB = av_frame_alloc();
+
+        //创建图像数据存储buf
+        //av_image_get_buffer_size一帧大小
+        buf = (unsigned char*)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_RGB32, pVideoAVctx->width, pVideoAVctx->height, 1));
+        av_image_fill_arrays(pAVframeRGB->data, pAVframeRGB->linesize, buf, AV_PIX_FMT_RGB32, pVideoAVctx->width, pVideoAVctx->height, 1);
+
+        //初始化pSwsCtx
+        pSwsCtx = sws_getContext(pVideoAVctx->width, pVideoAVctx->height, pVideoAVctx->pix_fmt, pVideoAVctx->width, pVideoAVctx->height, AV_PIX_FMT_RGB32, SWS_BICUBIC, NULL, NULL, NULL);
+
+        width = pVideoAVctx->width;
+        height = pVideoAVctx->height;
+    }     
+
+    if (hasAudio)
+    {
+        //获取音视频流编码
+        pAudioAVctx = avcodec_alloc_context3(NULL);
+        //查找解码器
+        avcodec_parameters_to_context(pAudioAVctx, pFormatCtx->streams[AudioIndex]->codecpar);
+        pAudioCodec = avcodec_find_decoder(pAudioAVctx->codec_id);
+        if (pAudioCodec == NULL)
+        {
+            avcodec_free_context(&pAudioAVctx);
+            avformat_close_input(&pFormatCtx);
+            qDebug("avcodec_find_decoder err.\n");
+            return -4;
+        }
+        //打开解码器
+        if (avcodec_open2(pAudioAVctx, pAudioCodec, NULL) < 0)
+        {
+            avcodec_free_context(&pAudioAVctx);
+            avformat_close_input(&pFormatCtx);
+            qDebug("avcodec_open2 err.\n");
+            return -5;
+        }
+        
+        //重采样
+        outSampleFmt = AV_SAMPLE_FMT_S16;                       //声音格式
+        outSampleRate = pAudioAVctx->sample_rate;               //采样率
+        outSampleNb = pAudioAVctx->frame_size;
+        outChannelLayout = pAudioAVctx->ch_layout;
+        //音频输出buff
+        outBufferSize = av_samples_get_buffer_size(NULL, outChannelLayout.nb_channels, outSampleNb, outSampleFmt, 1);  
+        outBuff = (unsigned char*)av_malloc(MAX_AUDIO_FRAME_SIZE * outChannelLayout.nb_channels);
+
+        if (swr_alloc_set_opts2(&pSwrctx, &outChannelLayout, outSampleFmt, outSampleRate,
+            &pAudioAVctx->ch_layout, pAudioAVctx->sample_fmt, pAudioAVctx->sample_rate, 0, NULL))
+        {
+            qDebug("swr_alloc_set_opts2 error!\n");
+            return -1;
+        }
+        swr_init(pSwrctx);
+
+        
+        //初始SDL
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO))
+        {
+            qDebug("SDL_Init(SDL_INIT_AUDIO) error\n");
+            return -1;
+        }
+
+        SDL_AudioSpec wantSpec;
+        wantSpec.freq = outSampleRate;
+        wantSpec.format = AUDIO_FORMAT_MAP[outSampleFmt];
+        wantSpec.channels = outChannelLayout.nb_channels;
+        wantSpec.silence = 0;
+        wantSpec.samples = outSampleNb;
+        wantSpec.callback = fillAudio;
+        if (SDL_OpenAudio(&wantSpec, NULL) < 0) {
+            qDebug("can not open SDL!\n");
+            return -1;
+        }
+
+        SDL_PauseAudio(0);
+    }  
 
     //初始化pAVpkt
     pAVpkt = (AVPacket*)av_malloc(sizeof(AVPacket));
 
     //初始化数据帧空间
     pAVframe = av_frame_alloc();
-    pAVframeRGB = av_frame_alloc();
-
-    //创建图像数据存储buf
-    //av_image_get_buffer_size一帧大小
-    buf = (unsigned char*)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_RGB32, pAVctx->width, pAVctx->height, 1));
-    av_image_fill_arrays(pAVframeRGB->data, pAVframeRGB->linesize, buf, AV_PIX_FMT_RGB32, pAVctx->width, pAVctx->height, 1);
-
-    //初始化pSwsCtx
-    pSwsCtx = sws_getContext(pAVctx->width, pAVctx->height, pAVctx->pix_fmt, pAVctx->width, pAVctx->height, AV_PIX_FMT_RGB32, SWS_BICUBIC, NULL, NULL, NULL);
     
-    width = pAVctx->width;
-    height = pAVctx->height;
-
     //循环读取视频数据
 	while (av_read_frame(pFormatCtx, pAVpkt) >= 0)//读取一帧未解码的数据
 	{
@@ -132,22 +245,23 @@ int VideoWidget::DeCode()
 		//如果是视频数据
 		if (pAVpkt->stream_index == VideoIndex)
 		{
+            qDebug("pAVpkt->stream_index == VideoIndex\n");
 			//解码一帧视频数据
-			ret = avcodec_send_packet(pAVctx, pAVpkt);
-			gotPicture = avcodec_receive_frame(pAVctx, pAVframe);
+			ret = avcodec_send_packet(pVideoAVctx, pAVpkt);
+			gotPicture = avcodec_receive_frame(pVideoAVctx, pAVframe);
 
 			if (ret < 0)
 			{
-                printf("Decode Error.\n");
+                qDebug("Decode Error.\n");
 				continue;
 			}
 
 			if (gotPicture == 0)
 			{
-				sws_scale(pSwsCtx, (const unsigned char* const*)pAVframe->data, pAVframe->linesize, 0, pAVctx->height, pAVframeRGB->data, pAVframeRGB->linesize);
-                uchar* tmp = new uchar[av_image_get_buffer_size(AV_PIX_FMT_RGB32, pAVctx->width, pAVctx->height, 1)];
-                memcpy(tmp, pAVframeRGB->data[0], av_image_get_buffer_size(AV_PIX_FMT_RGB32, pAVctx->width, pAVctx->height, 1));
-                QImage* img = new QImage(tmp, pAVctx->width, pAVctx->height, QImage::Format_RGB32);
+				sws_scale(pSwsCtx, (const unsigned char* const*)pAVframe->data, pAVframe->linesize, 0, pVideoAVctx->height, pAVframeRGB->data, pAVframeRGB->linesize);
+                uchar* tmp = new uchar[av_image_get_buffer_size(AV_PIX_FMT_RGB32, pVideoAVctx->width, pVideoAVctx->height, 1)];
+                memcpy(tmp, pAVframeRGB->data[0], av_image_get_buffer_size(AV_PIX_FMT_RGB32, pVideoAVctx->width, pVideoAVctx->height, 1));
+                QImage* img = new QImage(tmp, pVideoAVctx->width, pVideoAVctx->height, QImage::Format_RGB32);
 
                 int decode_index = 0;
 				mutex.lock();
@@ -158,16 +272,50 @@ int VideoWidget::DeCode()
                     std::this_thread::sleep_for(std::chrono::milliseconds(3 * 500 * fps_den / fps_num));
 			}
 		}
+
+        if (pAVpkt->stream_index == AudioIndex)
+        {
+            qDebug("pAVpkt->stream_index == AudioIndex\n");
+            
+            //解码一帧音频数据
+            ret = avcodec_send_packet(pAudioAVctx, pAVpkt);
+            gotAudio = avcodec_receive_frame(pAudioAVctx, pAVframe);
+
+            if (ret < 0)
+            {
+                qDebug("Decode Error.\n");
+                continue;
+            }
+            ret = swr_convert(pSwrctx, &outBuff, MAX_AUDIO_FRAME_SIZE, pAVframe->data, pAVframe->nb_samples);
+            if (ret < 0)
+            {
+                qDebug("Convert Error.\n");
+                continue;
+            }
+            if (gotAudio == 0)
+            {
+                while (audioLen > 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                audioChunk = (unsigned char*)outBuff;
+                audioPos = audioChunk;
+                audioLen = outBufferSize;
+            }
+        }
 		av_packet_unref(pAVpkt);
 	}
     //释放资源
     sws_freeContext(pSwsCtx);
     av_frame_free(&pAVframeRGB);
     av_frame_free(&pAVframe);
-    avcodec_free_context(&pAVctx);
+    avcodec_free_context(&pVideoAVctx);
     avformat_close_input(&pFormatCtx);
+    if (hasAudio)
+    {
+        swr_free(&pSwrctx);
+        SDL_Quit();
+    }
 
-    //该视频已解码完毕
+    //已解码完毕
     decoder_state = DecoderState::DECODED;
 
     return -1;
@@ -202,7 +350,6 @@ void VideoWidget::Pause()
 void VideoWidget::paintGL()
 {
     QImage* tmp = NULL;
-    resize(width, height);
     glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
     glClearColor(0.0, 0.0, 0.0, 1);
     vao.bind();
@@ -283,6 +430,7 @@ void VideoWidget::initializeGL()
 
 void VideoWidget::resizeGL(int w, int h)
 {
+    resize(width < w ? width : w, height < h ? height : h);
     glViewport(0, 0, w, h);
 }
 

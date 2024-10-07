@@ -11,6 +11,7 @@
 #include <functional>
 #include <thread>
 #include <mutex>
+#include <map>
 
 class VideoWidget : public QOpenGLWidget, protected QOpenGLFunctions
 {
