@@ -42,18 +42,18 @@ private:
     std::mutex mutex;
 
     enum PlayerState {
-        PLAYING,
-        STOP,
-        PAUSE
+        PLAYER_PLAYING,
+        PLAYER_STOP,
+        PLAYER_PAUSED
     };
 
     enum DecoderState {
-        DECODING,
-        DECODED,
-        PAUSED
+        DECODER_DECODING,
+        DECODER_DECODED,
+        DECODER_PAUSED
     };
-    PlayerState player_state = STOP;        //²¥·ÅÆ÷µÄ×´Ì¬
-    DecoderState decoder_state = DECODED;   //½âÂëÆ÷µÄ×´Ì¬
+    PlayerState player_state = PLAYER_STOP;        //²¥·ÅÆ÷µÄ×´Ì¬
+    DecoderState decoder_state = DECODER_DECODED;   //½âÂëÆ÷µÄ×´Ì¬
 
     int fps_den = 1, fps_num = 60;
     int timerID;

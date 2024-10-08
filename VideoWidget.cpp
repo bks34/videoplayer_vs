@@ -10,6 +10,9 @@ extern "C"
 #include <libswresample/swresample.h>
 }
 
+//如在调试,可取消该宏的定义
+/*#define _VIDEOWIDGET_DEBUG*/ 
+
 static const char vertShader[] = R"(#version 430
                                  in vec3 vPos;
                                  in vec2 vTexture;
@@ -89,16 +92,24 @@ int VideoWidget::DeCode()
     //初始化pFormatCtx
     if (avformat_open_input(&pFormatCtx, videoPath.toStdString().data(), NULL, NULL) != 0)
     {
+#ifdef _VIDEOWIDGET_DEBUG
         qDebug("avformat_open_input err.\n");
+#endif // _VIDEOWIDGET_DEBUG
+        decoder_state = DECODER_DECODED;
+        player_state = PLAYER_STOP;
         return -1;
     }
 
     //获取音视频流数据信息
     if (avformat_find_stream_info(pFormatCtx, NULL) < 0)
     {
-        avformat_close_input(&pFormatCtx);
+#ifdef _VIDEOWIDGET_DEBUG
         qDebug("avformat_find_stream_info err.\n");
-        return -2;
+#endif // _VIDEOWIDGET_DEBUG
+        avformat_close_input(&pFormatCtx);
+        decoder_state = DECODER_DECODED;
+        player_state = PLAYER_STOP;
+        return -1;
     }
 
     //找到视频流的索引
@@ -106,7 +117,9 @@ int VideoWidget::DeCode()
     if (VideoIndex >= 0)
     {
         hasVideo = true;
+#ifdef _VIDEOWIDGET_DEBUG
         qDebug("There is a video stream %d.\n", VideoIndex);
+#endif // _VIDEOWIDGET_DEBUG
     }
 
     //找到音频流的索引
@@ -114,12 +127,18 @@ int VideoWidget::DeCode()
     if (AudioIndex >= 0)
     {
         hasAudio = true;
+#ifdef _VIDEOWIDGET_DEBUG
         qDebug("There is a audio stream %d.\n", AudioIndex);
+#endif // _VIDEOWIDGET_DEBUG
     }
    
     if (!(hasAudio || hasVideo))
     {
-        qDebug("Not a Video!!!\n");
+#ifdef _VIDEOWIDGET_DEBUG
+        qDebug("Format not support!!!\n");
+#endif // _VIDEOWIDGET_DEBUG
+        decoder_state = DECODER_DECODED;
+        player_state = PLAYER_STOP;
         return -1;
     }
 
@@ -138,18 +157,29 @@ int VideoWidget::DeCode()
         pCodec = avcodec_find_decoder(pVideoAVctx->codec_id);
         if (pCodec == NULL)
         {
+#ifdef _VIDEOWIDGET_DEBUG
+            qDebug("avcodec_find_decoder err.\n");
+#endif // _VIDEOWIDGET_DEBUG
+
             avcodec_free_context(&pVideoAVctx);
             avformat_close_input(&pFormatCtx);
-            qDebug("avcodec_find_decoder err.\n");
-            return -4;
+
+            decoder_state = DECODER_DECODED;
+            player_state = PLAYER_STOP;
+            return -1;
         }
         //打开解码器
         if (avcodec_open2(pVideoAVctx, pCodec, NULL) < 0)
         {
+#ifdef _VIDEOWIDGET_DEBUG
+            qDebug("avcodec_open2 err.\n");
+#endif // _VIDEOWIDGET_DEBUG
             avcodec_free_context(&pVideoAVctx);
             avformat_close_input(&pFormatCtx);
-            qDebug("avcodec_open2 err.\n");
-            return -5;
+            
+            decoder_state = DECODER_DECODED;
+            player_state = PLAYER_STOP;
+            return -1;
         }
 
         pAVframeRGB = av_frame_alloc();
@@ -175,18 +205,28 @@ int VideoWidget::DeCode()
         pAudioCodec = avcodec_find_decoder(pAudioAVctx->codec_id);
         if (pAudioCodec == NULL)
         {
+#ifdef _VIDEOWIDGET_DEBUG
+            qDebug("avcodec_find_decoder err.\n");
+#endif // _VIDEOWIDGET_DEBUG
             avcodec_free_context(&pAudioAVctx);
             avformat_close_input(&pFormatCtx);
-            qDebug("avcodec_find_decoder err.\n");
-            return -4;
+            
+            decoder_state = DECODER_DECODED;
+            player_state = PLAYER_STOP;
+            return -1;
         }
         //打开解码器
         if (avcodec_open2(pAudioAVctx, pAudioCodec, NULL) < 0)
         {
+#ifdef _VIDEOWIDGET_DEBUG
+            qDebug("avcodec_open2 err.\n");
+#endif // _VIDEOWIDGET_DEBUG
             avcodec_free_context(&pAudioAVctx);
             avformat_close_input(&pFormatCtx);
-            qDebug("avcodec_open2 err.\n");
-            return -5;
+            
+            decoder_state = DECODER_DECODED;
+            player_state = PLAYER_STOP;
+            return -1;
         }
         
         //重采样
@@ -201,7 +241,12 @@ int VideoWidget::DeCode()
         if (swr_alloc_set_opts2(&pSwrctx, &outChannelLayout, outSampleFmt, outSampleRate,
             &pAudioAVctx->ch_layout, pAudioAVctx->sample_fmt, pAudioAVctx->sample_rate, 0, NULL))
         {
+#ifdef _VIDEOWIDGET_DEBUG
             qDebug("swr_alloc_set_opts2 error!\n");
+#endif // _VIDEOWIDGET_DEBUG
+            
+            decoder_state = DECODER_DECODED;
+            player_state = PLAYER_STOP;
             return -1;
         }
         swr_init(pSwrctx);
@@ -210,9 +255,21 @@ int VideoWidget::DeCode()
         //初始SDL
         if (SDL_InitSubSystem(SDL_INIT_AUDIO))
         {
+#ifdef _VIDEOWIDGET_DEBUG
             qDebug("SDL_Init(SDL_INIT_AUDIO) error\n");
+#endif // _VIDEOWIDGET_DEBUG
+            
+            decoder_state = DECODER_DECODED;
+            player_state = PLAYER_STOP;
             return -1;
         }
+#ifdef _VIDEOWIDGET_DEBUG
+        qDebug("SDL_GetNumAudioDrivers(): %d\n Drivers that SDL can use:\n", SDL_GetNumAudioDrivers());
+        for (int i = 0; i < SDL_GetNumAudioDrivers(); ++i)
+            qDebug("%d : %s\n", i, SDL_GetAudioDriver(i));
+        qDebug("The driver using now: %s\n",SDL_GetCurrentAudioDriver());
+#endif // _VIDEOWIDGET_DEBUG
+
 
         SDL_AudioSpec wantSpec;
         wantSpec.freq = outSampleRate;
@@ -221,8 +278,14 @@ int VideoWidget::DeCode()
         wantSpec.silence = 0;
         wantSpec.samples = outSampleNb;
         wantSpec.callback = fillAudio;
-        if (SDL_OpenAudio(&wantSpec, NULL) < 0) {
+        if (SDL_OpenAudio(&wantSpec, NULL) < 0) 
+        {
+#ifdef _VIDEOWIDGET_DEBUG
             qDebug("can not open SDL!\n");
+#endif // _VIDEOWIDGET_DEBUG
+            
+            decoder_state = DECODER_DECODED;
+            player_state = PLAYER_STOP;
             return -1;
         }
 
@@ -239,20 +302,26 @@ int VideoWidget::DeCode()
 	while (av_read_frame(pFormatCtx, pAVpkt) >= 0)//读取一帧未解码的数据
 	{
         //如果状态是暂停
-        while (decoder_state == DecoderState::PAUSED)
+        while (decoder_state == DECODER_PAUSED)
             continue;
 
 		//如果是视频数据
 		if (pAVpkt->stream_index == VideoIndex)
 		{
+#ifdef _VIDEOWIDGET_DEBUG
             qDebug("pAVpkt->stream_index == VideoIndex\n");
+#endif // _VIDEOWIDGET_DEBUG
+            
 			//解码一帧视频数据
 			ret = avcodec_send_packet(pVideoAVctx, pAVpkt);
 			gotPicture = avcodec_receive_frame(pVideoAVctx, pAVframe);
 
 			if (ret < 0)
 			{
+#ifdef _VIDEOWIDGET_DEBUG
                 qDebug("Decode Error.\n");
+#endif // _VIDEOWIDGET_DEBUG
+                
 				continue;
 			}
 
@@ -268,14 +337,16 @@ int VideoWidget::DeCode()
                 frames.push_back(img);
                 decode_index = frames.size();
 				mutex.unlock();
-                if (decode_index - play_index >= 3)
-                    std::this_thread::sleep_for(std::chrono::milliseconds(3 * 500 * fps_den / fps_num));
+                if (decode_index - play_index >= 2)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2 * 500 * fps_den / fps_num));
 			}
 		}
 
         if (pAVpkt->stream_index == AudioIndex)
         {
+#ifdef _VIDEOWIDGET_DEBUG
             qDebug("pAVpkt->stream_index == AudioIndex\n");
+#endif // _VIDEOWIDGET_DEBUG
             
             //解码一帧音频数据
             ret = avcodec_send_packet(pAudioAVctx, pAVpkt);
@@ -283,13 +354,17 @@ int VideoWidget::DeCode()
 
             if (ret < 0)
             {
+#ifdef _VIDEOWIDGET_DEBUG
                 qDebug("Decode Error.\n");
+#endif // _VIDEOWIDGET_DEBUG           
                 continue;
             }
             ret = swr_convert(pSwrctx, &outBuff, MAX_AUDIO_FRAME_SIZE, pAVframe->data, pAVframe->nb_samples);
             if (ret < 0)
             {
+#ifdef _VIDEOWIDGET_DEBUG
                 qDebug("Convert Error.\n");
+#endif // _VIDEOWIDGET_DEBUG      
                 continue;
             }
             if (gotAudio == 0)
@@ -312,26 +387,27 @@ int VideoWidget::DeCode()
     if (hasAudio)
     {
         swr_free(&pSwrctx);
+        SDL_CloseAudio();
         SDL_Quit();
     }
 
     //已解码完毕
-    decoder_state = DecoderState::DECODED;
+    decoder_state = DECODER_DECODED;
 
-    return -1;
+    return 0;
 }
 
 void VideoWidget::Play()
 {
-    player_state = PlayerState::PLAYING;
-    if (decoder_state == DecoderState::PAUSED)
-        decoder_state = DecoderState::DECODING;
-    if (decoder_state == DecoderState::DECODED)
+    player_state = PLAYER_PLAYING;
+    if (decoder_state == DECODER_PAUSED)
+        decoder_state = DECODER_DECODING;
+    if (decoder_state == DECODER_DECODED)
     {
         mutex.lock();
         if (frames.empty())
         {
-            decoder_state = DecoderState::DECODING;
+            decoder_state = DECODER_DECODING;
             t_decode = std::thread(&VideoWidget::DeCode, this);
             t_decode.detach();
         }
@@ -341,10 +417,10 @@ void VideoWidget::Play()
 
 void VideoWidget::Pause()
 {
-    if(player_state == PlayerState::PLAYING)
-        player_state = PlayerState::PAUSE;
-    if(decoder_state == DecoderState::DECODING)
-        decoder_state = DecoderState::PAUSED;
+    if(player_state == PLAYER_PLAYING)
+        player_state = PLAYER_PAUSED;
+    if(decoder_state == DECODER_DECODING)
+        decoder_state = DECODER_PAUSED;
 }
 
 void VideoWidget::paintGL()
@@ -362,12 +438,15 @@ void VideoWidget::paintGL()
     }
     //播放完毕后清除frames        
     //以及texture(不同视频的texture的尺寸格式等不同)
-    if (decoder_state ==DECODED && play_index >= frames.size())
+    if (decoder_state == DECODER_DECODED && play_index >= frames.size())
     {
         play_index = 0;
         frames.clear();
-        delete texture;
-        texture = NULL;
+        if (texture)
+        {
+            delete texture;
+            texture = NULL;
+        }
     }
     mutex.unlock();
 
@@ -375,9 +454,18 @@ void VideoWidget::paintGL()
     if (tmp)
     {
         if (!texture)
+        {
             texture = new QOpenGLTexture(tmp->mirrored());
+            texture->setMinificationFilter(QOpenGLTexture::Nearest);
+            texture->setMagnificationFilter(QOpenGLTexture::Linear);
+        }
         else
+        {
+            texture->destroy();
             texture->setData(tmp->mirrored());
+            texture->setMinificationFilter(QOpenGLTexture::Nearest);
+            texture->setMagnificationFilter(QOpenGLTexture::Linear);
+        }
         texture->bind();
     }
     
@@ -430,14 +518,23 @@ void VideoWidget::initializeGL()
 
 void VideoWidget::resizeGL(int w, int h)
 {
-    resize(width < w ? width : w, height < h ? height : h);
+    if (width < w && height < h)
+        resize(width, height);
+    else
+    {
+        double r = (double)width / height;
+        if (r > (double)w / h)
+            resize(w, w / r);
+        else
+            resize(h * r, h);
+    }
     glViewport(0, 0, w, h);
 }
 
 void VideoWidget::timerEvent(QTimerEvent* event)
 {
-    if(player_state == PlayerState::PLAYING)
-        repaint();
+    if (player_state == PLAYER_PLAYING)
+        update();
     if (fpsChanged)
     {
         killTimer(timerID);
